@@ -17,10 +17,15 @@ All positions, alignment and line styles are driven by LayoutConfig.
 from __future__ import annotations
 
 import random
+import math
 
 from PIL import ImageDraw, ImageFont
 
 from layout_engine import Align, BoundingBox, LayoutConfig, LayoutEngine
+from realism_effects import (
+    jitter_text_color, blurred_text_layer,
+    irregular_dot_fill, draw_irregular_line,
+)
 
 
 # ── Font loader ────────────────────────────────────────────────────────────
@@ -55,22 +60,23 @@ def _th(draw, text, font) -> int:
 # ── Line style helpers ─────────────────────────────────────────────────────
 
 def _make_fill_line(style: str, width_px: int) -> str:
-    """Return a fill character string of approximate width_px for given style."""
+    """Return a fill character string of approximate width_px for given style.
+    Dots use irregular spacing for a more realistic hand-typed appearance."""
     if style == "dots":
-        return "." * (width_px // 7)
+        return irregular_dot_fill(width_px, ".", base_spacing=7)
     elif style == "line":
         return "_" * (width_px // 6)
     else:  # mixed: dots then underscores
         half = width_px // 2
-        return "." * (half // 7) + "_" * (half // 6)
+        return irregular_dot_fill(half, ".", base_spacing=7) + "_" * (half // 6)
 
 
 def _draw_actual_line(draw: ImageDraw.ImageDraw,
                       x0: int, x1: int, y: int,
                       color=(160, 160, 160), style="dots") -> None:
-    """Draw an actual separator line (used for 'line' style)."""
+    """Draw a slightly wavy separator line (used for 'line' style)."""
     if style == "line":
-        draw.line([(x0, y), (x1, y)], fill=color, width=1)
+        draw_irregular_line(draw, x0, x1, y, color=color, amplitude=0.8, jitter_y=1)
 
 
 # ── BodyRenderer ──────────────────────────────────────────────────────────
@@ -136,7 +142,8 @@ class BodyRenderer:
 
         # ── Separator ─────────────────────────────────────────────────────
         sep_y = min(y, bb.y1 - 60)
-        self.draw.line([(bb.x0, sep_y), (bb.x1, sep_y)], fill=self.color, width=1)
+        draw_irregular_line(self.draw, bb.x0, bb.x1, sep_y,
+                            color=self.color, amplitude=0.6, jitter_y=1)
         y = sep_y + 6
 
         # ── Row 3: A l'ordre de ───────────────────────────────────────────
@@ -155,12 +162,20 @@ class BodyRenderer:
         legal_fr = "Payer contre ce chèque non endossable le montant suivant"
         legal_ar = "يدفع مقابل هذا الشيك غير القابل للتظهير، المبلغ التالي:"
 
+        # Slight baseline jitter for realism
+        y_fr = y + random.randint(-1, 2)
+        y_ar = y + random.randint(-1, 2)
+
         # French always left-anchored for readability
-        self.draw.text((bb.x0 + 8, y), legal_fr, fill=(30, 30, 30), font=self.fn_lbl)
+        blurred_text_layer(self.draw._image, legal_fr,
+                           (bb.x0 + 8, y_fr), self.fn_lbl,
+                           jitter_text_color((30, 30, 30)))
 
         # Arabic always right-anchored
         aw = _tw(self.draw, legal_ar, self.fn_sm)
-        self.draw.text((bb.x1 - aw - 8, y), legal_ar, fill=(30, 30, 30), font=self.fn_sm)
+        blurred_text_layer(self.draw._image, legal_ar,
+                           (bb.x1 - aw - 8, y_ar), self.fn_sm,
+                           jitter_text_color((30, 30, 30)))
 
         return y + _th(self.draw, legal_fr, self.fn_lbl) + 2
 
@@ -176,9 +191,14 @@ class BodyRenderer:
 
         x_fill = self._x_for(BoundingBox(bb.x0, y, bb.x1 - rl_w - 12, y + 20),
                               fill_w_actual, align)
-        self.draw.text((x_fill, y), fill, fill=(160, 160, 160), font=self.fn_sm)
-        self.draw.text((bb.x1 - rl_w - 6, y), right_label,
-                       fill=(60, 60, 60), font=self.fn_lbl)
+        y_fill = y + random.randint(-1, 1)
+        self.draw.text((x_fill, y_fill), fill,
+                       fill=jitter_text_color((160, 160, 160), spread=12),
+                       font=self.fn_sm)
+        self.draw.text((bb.x1 - rl_w - 6, y),
+                       right_label,
+                       fill=jitter_text_color((60, 60, 60)),
+                       font=self.fn_lbl)
 
         if style in ("line", "mixed"):
             _draw_actual_line(self.draw, bb.x0 + 8, bb.x1 - rl_w - 14,
@@ -204,10 +224,12 @@ class BodyRenderer:
             align
         )
 
+        y_fill = y + random.randint(-1, 1)
+
         self.draw.text(
-            (x, y),
+            (x, y_fill),
             fill,
-            fill=(160, 160, 160),
+            fill=jitter_text_color((160, 160, 160), spread=12),
             font=self.fn_sm
         )
 
@@ -215,13 +237,12 @@ class BodyRenderer:
         self.draw.text(
             (bb.x1 - rl_w - 6, y),
             right_label,
-            fill=(60, 60, 60),
+            fill=jitter_text_color((60, 60, 60)),
             font=self.fn_lbl
         )
 
         return y + _th(self.draw, right_label, self.fn_lbl) + 2
 
-        
 
     def _row_ordre(self, bb: BoundingBox, y: int,
                    align: Align, style: str) -> None:
@@ -230,12 +251,17 @@ class BodyRenderer:
         label_ar = "لأمر السيد/ة:"
         lw       = _tw(self.draw, label, self.fn_lbl)
 
-        self.draw.text((bb.x0 + 8, y), label, fill=(40, 40, 40), font=self.fn_lbl)
+        # Slight baseline jitter between French and Arabic labels
+        y_fr = y + random.randint(-1, 2)
+        y_ar = y + random.randint(-1, 2)
+
+        self.draw.text((bb.x0 + 8, y_fr), label,
+                       fill=jitter_text_color((40, 40, 40)), font=self.fn_lbl)
 
         # Arabic label right-aligned
         aw = _tw(self.draw, label_ar, self.fn_sm)
-        self.draw.text((bb.x1 - aw - 8, y), label_ar,
-                       fill=(60, 60, 60), font=self.fn_sm)
+        self.draw.text((bb.x1 - aw - 8, y_ar), label_ar,
+                       fill=jitter_text_color((60, 60, 60)), font=self.fn_sm)
 
         # Beneficiary name or fill
         benef = self.data.get("beneficiaire", "")
@@ -243,8 +269,11 @@ class BodyRenderer:
         bx   += random.randint(-self.cfg.jitter_x, self.cfg.jitter_x)
 
         if benef:
-            self.draw.text((bx, y), benef[:40], fill=(15, 15, 15), font=self.fn_val)
+            self.draw.text((bx, y), benef[:40],
+                           fill=jitter_text_color((15, 15, 15)), font=self.fn_val)
         else:
             fill_w = bb.x1 - aw - bx - 20
             fill   = _make_fill_line(style, max(fill_w, 40))
-            self.draw.text((bx, y), fill, fill=(180, 180, 180), font=self.fn_sm)
+            self.draw.text((bx, y), fill,
+                           fill=jitter_text_color((180, 180, 180), spread=10),
+                           font=self.fn_sm)
