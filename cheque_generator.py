@@ -28,11 +28,12 @@ from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime, timedelta
 
 # ── Local modules ──────────────────────────────────────────────────────────
-from qr_generator   import build_qr_payload, make_qr_image, make_corrupted_qr_image
-from layout_engine  import LayoutEngine, LayoutConfig, W, H, M
+from qr_generator    import build_qr_payload, make_qr_image, make_corrupted_qr_image
+from layout_engine   import LayoutEngine, LayoutConfig, W, H, M
 from header_renderer import HeaderRenderer
 from body_renderer   import BodyRenderer
 from footer_renderer import FooterRenderer
+from realism_effects import apply_realism_effects
 
 fake   = Faker("fr_FR")
 engine = LayoutEngine()
@@ -417,6 +418,7 @@ def create_valid_cheque(index: int) -> None:
 
     FooterRenderer(img, draw, bank, cfg, engine, data).render()
 
+    img = apply_realism_effects(img)
     img = apply_scan_effects(img,
           intensity=random.choices(["light","medium","heavy"], weights=[0.30,0.55,0.15])[0])
     save_img(img, "valid", index, bank_short=bank["short"])
@@ -583,6 +585,7 @@ def create_invalid_cheque(index: int) -> None:
         ov  = Image.new("RGB", (W, H), col)
         img = Image.blend(img, ov, 0.20)
 
+    img = apply_realism_effects(img)
     img = apply_scan_effects(img, intensity="heavy")
     save_img(img, "invalid", index, bank_short=bank["short"], defect=defect)
 
@@ -794,6 +797,7 @@ def create_non_cheque(index: int) -> None:
               "".join(random.choices(string.ascii_uppercase + string.digits, k=60)),
               fill=(200, 200, 200), font=fn_mic)
 
+    img = apply_realism_effects(img)
     img = apply_scan_effects(img, intensity=random.choice(["light","medium"]))
     save_img(img, "non_cheque", index,
              bank_short=bank["short"] if bank else "")

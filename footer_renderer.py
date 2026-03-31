@@ -19,12 +19,17 @@ from __future__ import annotations
 
 import random
 import string
+import math
 import numpy as np
 from datetime import datetime
 
 from PIL import Image, ImageDraw, ImageFont
 
 from layout_engine import Align, VAlign, BoundingBox, LayoutConfig, LayoutEngine
+from realism_effects import (
+    jitter_text_color, blurred_text_layer,
+    irregular_dot_fill, draw_irregular_line,
+)
 
 
 # ── Font loader ────────────────────────────────────────────────────────────
@@ -81,21 +86,67 @@ def _draw_signature(draw: ImageDraw.ImageDraw,
                     bank: dict,
                     x: int, y: int,
                     w: int, h: int) -> None:
-    """Cursive signature simulation."""
+    """
+    Realistic cursive signature simulation.
+
+    Improvements over the previous version:
+    - Multiple overlapping strokes with independent path variation
+    - Variable per-segment line thickness
+    - Random discontinuities (pen lifts)
+    - Slight angle tilt per stroke
+    - Initial underdot / paraph marks (25 % chance)
+    """
     if random.random() > 0.82:
         return
-    color = bank["color"]
-    for _ in range(random.randint(1, 3)):
-        pts = []
-        sx  = x + random.randint(4, 18)
-        by  = y + random.randint(4, h - 14)
-        for i in range(random.randint(10, 18)):
-            px = sx + i * int(w / 17)
-            py = by + int(14 * np.sin(i * random.uniform(0.35, 0.85))
-                         + random.randint(-6, 6))
-            py = max(y, min(y + h, py))
-            pts.append((px, py))
-        draw.line(pts, fill=color, width=random.randint(2, 3))
+
+    color    = bank["color"]
+    n_passes = random.randint(1, 3)   # up to 3 overlapping strokes
+
+    for pass_idx in range(n_passes):
+        # Each stroke starts at a slightly different horizontal offset
+        sx   = x + random.randint(4, max(5, w // 5))
+        base_y = y + random.randint(int(h * 0.25), int(h * 0.65))
+        n_pts  = random.randint(12, 22)
+        step_w = max(1, (w - (sx - x) - random.randint(4, 14)) // max(1, n_pts))
+
+        # Build the stroke with random discontinuities
+        segment: list[tuple[int, int]] = []
+        freq  = random.uniform(0.30, 0.90)
+        phase = random.uniform(0, math.pi * 2)
+        amp   = random.randint(8, min(18, h // 2))
+
+        for i in range(n_pts):
+            px = sx + i * step_w
+            py = base_y + int(amp * math.sin(i * freq + phase)
+                              + random.randint(-4, 4))
+            py = max(y + 2, min(y + h - 2, py))
+
+            # Random pen-lift: end current segment and start a new one
+            if i > 0 and random.random() < 0.12:
+                if len(segment) >= 2:
+                    draw.line(segment, fill=color,
+                              width=random.randint(1, 3))
+                segment = []
+
+            segment.append((px, py))
+
+        if len(segment) >= 2:
+            draw.line(segment, fill=color,
+                      width=random.randint(1, 3))
+
+    # Paraph / underline flourish (50 % chance)
+    if random.random() < 0.50:
+        fx0 = x + random.randint(4, w // 4)
+        fx1 = x + w - random.randint(4, w // 4)
+        fy  = y + h - random.randint(6, 14)
+        # Slight arc underline
+        arc_pts = []
+        for xi in range(fx0, fx1, 2):
+            t   = (xi - fx0) / max(1, fx1 - fx0)
+            arc_y = fy + int(4 * math.sin(math.pi * t))
+            arc_pts.append((xi, arc_y))
+        if len(arc_pts) >= 2:
+            draw.line(arc_pts, fill=color, width=random.randint(1, 2))
 
 
 # ── FooterRenderer ────────────────────────────────────────────────────────
@@ -174,7 +225,7 @@ class FooterRenderer:
         if not self.show.get("payable", True):
             return
 
-        y = bb.y0 + 8
+        y   = bb.y0 + 8
         pad = bb.x0 + 8
 
         rows = [
@@ -189,22 +240,29 @@ class FooterRenderer:
         for fr, ar in rows:
             if y + line_h > bb.y1 - 10:
                 break
+            # Slight per-row baseline jitter
+            y_row = y + random.randint(-1, 1)
             if fr:
-                self.draw.text((pad, y), fr, fill=(40, 40, 40), font=self.fn_lbl)
+                self.draw.text((pad, y_row), fr,
+                               fill=jitter_text_color((40, 40, 40)), font=self.fn_lbl)
                 aw = _tw(self.draw, ar, self.fn_mic)
-                self.draw.text((bb.x1 - aw - 6, y), ar,
-                               fill=(80, 80, 80), font=self.fn_mic)
-                # Fill dots
-                lw = _tw(self.draw, fr, self.fn_lbl)
+                self.draw.text((bb.x1 - aw - 6, y_row), ar,
+                               fill=jitter_text_color((80, 80, 80)), font=self.fn_mic)
+                # Irregular fill dots
+                lw      = _tw(self.draw, fr, self.fn_lbl)
                 fill_x0 = pad + lw + 4
                 fill_x1 = bb.x1 - aw - 10
                 if fill_x1 > fill_x0 + 10:
-                    dots = "." * ((fill_x1 - fill_x0) // 7)
-                    self.draw.text((fill_x0, y), dots,
-                                   fill=(180, 180, 180), font=self.fn_sm)
+                    dots = irregular_dot_fill(fill_x1 - fill_x0, ".", 7)
+                    self.draw.text((fill_x0, y_row), dots,
+                                   fill=jitter_text_color((180, 180, 180), spread=10),
+                                   font=self.fn_sm)
             else:
                 # Empty continuation line
-                self.draw.text((pad, y), "." * 30, fill=(190, 190, 190), font=self.fn_sm)
+                dots = irregular_dot_fill(bb.x1 - pad - 20, ".", 7)
+                self.draw.text((pad, y_row), dots,
+                               fill=jitter_text_color((190, 190, 190), spread=10),
+                               font=self.fn_sm)
             y += line_h
 
     # ── Center: Client info (RIB, Titulaire, Dates) ───────────────────────
@@ -295,8 +353,8 @@ class FooterRenderer:
         """Expiration date (large) + MICR reference line."""
         # Reserve bottom 48px
         by = fb.y1 - 48
-        self.draw.line([(fb.x0, by), (fb.x1, by)],
-                       fill=(200, 200, 200), width=1)
+        draw_irregular_line(self.draw, fb.x0, fb.x1, by,
+                            color=(200, 200, 200), amplitude=0.5, jitter_y=1)
 
         by += 4
 
@@ -309,35 +367,46 @@ class FooterRenderer:
                 exp_str = str(exp)
 
             exp_lbl = "Date d'expiration  |  تاريخ الانتهاء"
-            self.draw.text((fb.x0 + 8, by - 14), exp_lbl,
-                           fill=(80, 80, 80), font=self.fn_mic)
-            self.draw.text((fb.x0 + 8, by), exp_str,
-                           fill=self.color, font=self.fn_num)
+            # Slight jitter on label vs value y position
+            y_lbl = by - 14 + random.randint(-1, 1)
+            y_val = by + random.randint(-1, 1)
+            self.draw.text((fb.x0 + 8, y_lbl), exp_lbl,
+                           fill=jitter_text_color((80, 80, 80)), font=self.fn_mic)
+            self.draw.text((fb.x0 + 8, y_val), exp_str,
+                           fill=jitter_text_color(self.color, spread=8),
+                           font=self.fn_num)
 
-        # MICR reference line (right-aligned)
+        # MICR reference line (right-aligned, with per-char horizontal jitter)
         if self.show.get("micr", True):
             ref  = self.data.get("cheque_reference", "")
             rib  = self.data.get("rib", "")[:18]
             micr = f'*"{rib}"  {ref}'
             mw   = _tw(self.draw, micr, self.fn_micr)
-            self.draw.text((fb.x1 - mw - 10, by), micr,
-                           fill=(15, 15, 15), font=self.fn_micr)
+            # Slight horizontal jitter on the MICR block position
+            mx = fb.x1 - mw - 10 + random.randint(-3, 3)
+            my = by + random.randint(-1, 1)
+            blurred_text_layer(
+                self.img, micr, (mx, my),
+                self.fn_micr,
+                jitter_text_color((15, 15, 15)),
+                blur_radius=random.uniform(0.4, 0.9),
+            )
 
     # ── Security footer bar ───────────────────────────────────────────────
 
     def _render_security_bar(self, fb: BoundingBox) -> None:
         y_bar = fb.y1 - 22
-        self.draw.line([(fb.x0, y_bar), (fb.x1, y_bar)],
-                       fill=self.color, width=1)
+        draw_irregular_line(self.draw, fb.x0, fb.x1, y_bar,
+                            color=self.color, amplitude=0.4, jitter_y=1)
 
         legal = (f"CHÈQUE VALABLE 1099 JOURS • NON ENDOSSABLE • "
                  f"{self.bank['name']} – Tunis, Tunisie")
-        self.draw.text((fb.x0 + 5, y_bar + 2), legal,
-                       fill=(130, 130, 130), font=self.fn_mic)
+        self.draw.text((fb.x0 + 5 + random.randint(-1, 1), y_bar + 2), legal,
+                       fill=jitter_text_color((130, 130, 130)), font=self.fn_mic)
 
         serial = "".join(random.choices(string.ascii_uppercase + string.digits, k=55))
-        self.draw.text((fb.x0 + 5, y_bar + 13), serial,
-                       fill=(200, 200, 200), font=self.fn_mic)
+        self.draw.text((fb.x0 + 5 + random.randint(-1, 1), y_bar + 13), serial,
+                       fill=jitter_text_color((200, 200, 200), spread=8), font=self.fn_mic)
 
     # ── Helper ────────────────────────────────────────────────────────────
 

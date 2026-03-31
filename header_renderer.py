@@ -45,6 +45,7 @@ from layout_engine import (
     compute_split_ratios,
     validate_header_layout,
 )
+from realism_effects import jitter_text_color, blurred_text_layer
 
 
 # ── Font loader ────────────────────────────────────────────────────────────
@@ -212,6 +213,7 @@ def _render_bank_name(draw:  ImageDraw.ImageDraw,
     """
     Render the French bank name + Arabic subtitle, vertically centred in bb.
     The French name is truncated word-by-word if it would overflow the width.
+    A slight horizontal offset and per-line baseline jitter simulate real printing.
     """
     color   = bank["color"]
     fn_fr   = fonts["bank"]
@@ -240,10 +242,21 @@ def _render_bank_name(draw:  ImageDraw.ImageDraw,
     fr_w = _tw(draw, name,    fn_fr)
     ar_w = _tw(draw, name_ar, fn_ar)
 
-    draw.text((bb.clamp_x(bb.x_for(fr_w, align), fr_w), y0),
-              name,    fill=color, font=fn_fr)
-    draw.text((bb.clamp_x(bb.x_for(ar_w, align), ar_w), y0 + fr_h + 6),
-              name_ar, fill=color, font=fn_ar)
+    # Slight independent horizontal offsets for French vs Arabic lines
+    fr_offset = random.randint(-6, 6)
+    ar_offset = random.randint(-5, 5)
+    # Slight baseline difference between the two lines
+    y_ar_extra = random.randint(-2, 3)
+
+    fr_x = bb.clamp_x(bb.x_for(fr_w, align), fr_w) + fr_offset
+    ar_x = bb.clamp_x(bb.x_for(ar_w, align), ar_w) + ar_offset
+
+    blurred_text_layer(draw._image, name,
+                       (fr_x, y0),
+                       fn_fr, jitter_text_color(color, spread=10))
+    blurred_text_layer(draw._image, name_ar,
+                       (ar_x, y0 + fr_h + 6 + y_ar_extra),
+                       fn_ar, jitter_text_color(color, spread=10))
 
 
 def _render_qr_adaptive(img:    Image.Image,
@@ -251,19 +264,15 @@ def _render_qr_adaptive(img:    Image.Image,
                         bb:     BoundingBox,
                         align:  Align) -> bool:
     """
-    Render the QR code inside bb with automatic downscaling.
-
-    Logic
-    -----
-    1. Compute available space: bb dimensions minus QR_PAD on each side.
-    2. If available < QR_MIN_RENDERABLE  → skip (too small to scan; log warning).
-    3. If available < QR_SIZE            → scale the QR image down to fit.
-    4. Place scaled/original QR at the correct alignment inside bb.
+    Render the QR code inside bb with automatic downscaling and border
+    breathing space so the QR never touches the slot edges.
 
     Returns True if the QR was rendered, False if skipped.
     """
-    avail_w = bb.w - QR_PAD * 2
-    avail_h = bb.h - QR_PAD * 2
+    # Use a larger internal pad for breathing space (at least 12 px from edges)
+    inner_pad = max(QR_PAD, 12)
+    avail_w = bb.w - inner_pad * 2
+    avail_h = bb.h - inner_pad * 2
 
     if avail_w < QR_MIN_RENDERABLE or avail_h < QR_MIN_RENDERABLE:
         _warnings.warn(
@@ -280,10 +289,17 @@ def _render_qr_adaptive(img:    Image.Image,
         scale    = min(avail_w / qw, avail_h / qh)
         new_size = max(QR_MIN_RENDERABLE, int(qw * scale))
         qr_img   = qr_img.resize((new_size, new_size), Image.NEAREST)
-        qw = qh  = new_size
+        qw = qh = new_size
 
-    x = bb.clamp_x(bb.x_for(qw, align), qw)
-    y = bb.clamp_y(bb.y_for(qh, VAlign.MIDDLE), qh)
+    # Compute placement with breathing-space inset bounding box
+    inset_bb = BoundingBox(
+        bb.x0 + inner_pad,
+        bb.y0 + inner_pad,
+        bb.x1 - inner_pad,
+        bb.y1 - inner_pad,
+    )
+    x = inset_bb.clamp_x(inset_bb.x_for(qw, align), qw)
+    y = inset_bb.clamp_y(inset_bb.y_for(qh, VAlign.MIDDLE), qh)
     img.paste(qr_img, (x, y))
     return True
 
@@ -352,6 +368,7 @@ def _render_cheque_info(draw:       ImageDraw.ImageDraw,
       Line 3: "N°: XXXXXXX  عدد"
 
     If bb is too narrow for line 1, "BANQUE" is dropped.
+    Each line gets a slight independent horizontal and vertical offset.
     """
     color    = bank["color"]
     fn_title = fonts["title"]
@@ -367,29 +384,41 @@ def _render_cheque_info(draw:       ImageDraw.ImageDraw,
     total_h = lh0 + 20 + 18
     y0      = bb.clamp_y(bb.y_for(total_h, VAlign.MIDDLE), total_h)
 
+    # Per-line independent offsets
+    off_l1 = (random.randint(-4, 4), random.randint(-2, 2))
+    off_l2 = (random.randint(-4, 4), random.randint(-2, 2))
+    off_l3 = (random.randint(-4, 4), random.randint(-2, 2))
+
     # ── Line 1: title (+ BANQUE if it fits) ───────────────────────────────
     title_w  = _tw(draw, cheque_lbl, fn_title)
     banque_w = _tw(draw, banque_lbl, fn_bpd)
     combined = title_w + banque_w
 
     if combined <= bb.w - 12:
-        tx = bb.clamp_x(bb.x_for(combined, align), combined)
-        draw.text((tx, y0), cheque_lbl, fill=color, font=fn_title)
-        draw.text((tx + title_w, y0 + 4), banque_lbl,
-                  fill=(50, 50, 50), font=fn_bpd)
+        tx = bb.clamp_x(bb.x_for(combined, align), combined) + off_l1[0]
+        blurred_text_layer(draw._image, cheque_lbl,
+                           (tx, y0 + off_l1[1]),
+                           fn_title, jitter_text_color(color, spread=10))
+        blurred_text_layer(draw._image, banque_lbl,
+                           (tx + title_w, y0 + 4 + off_l1[1]),
+                           fn_bpd, jitter_text_color((50, 50, 50)))
     else:
-        tx = bb.clamp_x(bb.x_for(title_w, align), title_w)
-        draw.text((tx, y0), cheque_lbl, fill=color, font=fn_title)
+        tx = bb.clamp_x(bb.x_for(title_w, align), title_w) + off_l1[0]
+        blurred_text_layer(draw._image, cheque_lbl,
+                           (tx, y0 + off_l1[1]),
+                           fn_title, jitter_text_color(color, spread=10))
 
     # ── Line 2: BPD ───────────────────────────────────────────────────────
     bw = _tw(draw, bpd_lbl, fn_bpd)
-    bx = bb.clamp_x(bb.x_for(bw, align), bw)
-    draw.text((bx, y0 + lh0), bpd_lbl, fill=(50, 50, 50), font=fn_bpd)
+    bx = bb.clamp_x(bb.x_for(bw, align), bw) + off_l2[0]
+    draw.text((bx, y0 + lh0 + off_l2[1]), bpd_lbl,
+              fill=jitter_text_color((50, 50, 50)), font=fn_bpd)
 
     # ── Line 3: Number ────────────────────────────────────────────────────
     nw = _tw(draw, num_lbl, fn_num)
-    nx = bb.clamp_x(bb.x_for(nw, align), nw)
-    draw.text((nx, y0 + lh0 + 20), num_lbl, fill=(20, 20, 20), font=fn_num)
+    nx = bb.clamp_x(bb.x_for(nw, align), nw) + off_l3[0]
+    draw.text((nx, y0 + lh0 + 20 + off_l3[1]), num_lbl,
+              fill=jitter_text_color((20, 20, 20)), font=fn_num)
 
 
 # ── Separator helpers ──────────────────────────────────────────────────────
