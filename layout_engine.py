@@ -1,5 +1,5 @@
 """
-layout_engine.py  (v2 – constraint-safe)
+layout_engine.py  (v3 – constraint-safe)
 ========================================
 Dynamic layout system for BCT Tunisian cheque generation.
 
@@ -22,6 +22,7 @@ Guaranteed invariants after validate_header_layout()
   P2  Each slot contains at most 1 LARGE element  (qr | logo)
   P3  QR receives >= QR_MIN_RENDERABLE px of height in its slot
   P4  QR slot width >= qr_size + QR_PAD
+  P5  Each slot contains at most SLOT_MAX_ELEMENTS elements total
 """
 
 from __future__ import annotations
@@ -96,6 +97,10 @@ RELOC_PRIORITY: dict[str, int] = {
     "logo":        3,
     "qr":          99,   # never relocate QR out of P3 pass
 }
+
+# Maximum number of elements allowed in a single slot.
+# Keeps each slot from becoming a cluttered column that causes overlap.
+SLOT_MAX_ELEMENTS: int = 2
 
 
 # ── Alignment enums ────────────────────────────────────────────────────────
@@ -345,6 +350,7 @@ def validate_header_layout(
     P2 – LARGE element cap   (max 1 LARGE per slot)
     P3 – QR minimum height   (QR must receive >= QR_MIN_RENDERABLE px)
     P4 – QR minimum width    (slot width must be >= qr_size + QR_PAD)
+    P5 – Slot element cap    (max SLOT_MAX_ELEMENTS elements per slot)
     """
     result:   dict[str, list[str]] = {k: list(v) for k, v in slots.items()}
     warnings: list[str]            = []
@@ -431,6 +437,21 @@ def validate_header_layout(
             f"P4: QR slot_w={slot_w}px < {qr_min_w}px in '{sname}' "
             f"→ moved QR to '{widest}' (w={slot_widths.get(widest, 0)}px)"
         )
+
+    # ── P5: Slot element count cap ────────────────────────────────────────
+    # Each slot may hold at most SLOT_MAX_ELEMENTS elements.  When a slot is
+    # over-full the lowest-priority excess elements are relocated one by one.
+    for sname in slot_names:
+        while len(result[sname]) > SLOT_MAX_ELEMENTS:
+            # Sort by relocation priority ascending (lowest = move first)
+            to_move = sorted(result[sname], key=lambda e: RELOC_PRIORITY.get(e, 5))[0]
+            result[sname].remove(to_move)
+            dest = _find_best_destination(result, to_move, exclude=[sname])
+            result[dest].append(to_move)
+            warnings.append(
+                f"P5: slot '{sname}' has >{SLOT_MAX_ELEMENTS} elements "
+                f"→ relocated '{to_move}' to '{dest}'"
+            )
 
     return result, warnings
 

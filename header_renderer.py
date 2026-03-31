@@ -1,5 +1,5 @@
 """
-header_renderer.py  (v2 – constraint-safe)
+header_renderer.py  (v3 – constraint-safe)
 ==========================================
 Renders the BCT cheque header zone using a validated dynamic layout.
 
@@ -8,18 +8,20 @@ Element renderers
 _render_logo()         – image logo with text fallback
 _render_bank_name()    – French + Arabic bank name block
 _render_qr_adaptive()  – QR with auto-scale when bounding box < QR_SIZE
-_render_plafond()      – 4-line ceiling amount block
+_render_plafond()      – ceiling amount block with size-adaptive fallback
 _render_cheque_info()  – title / BPD / number block
 
-Safety layer (new in v2)
-------------------------
+Safety layer (new in v2, extended in v3)
+-----------------------------------------
 validate_header_layout() is called in HeaderRenderer.render() BEFORE any
 drawing.  The validated/repaired slot dict is used for all subsequent
-rendering, so invariants P1–P4 are always satisfied at render time.
+rendering, so invariants P1–P5 are always satisfied at render time.
 
-_check_element_fits()  – pre-render minimum-size guard; logs & returns bool
+_check_element_fits()  – pre-render minimum-size guard; when it returns False
+                         the element is SKIPPED (not silently rendered into a
+                         too-small box) so no content overlap occurs.
 _render_qr_adaptive()  – scales the QR image down to fit if bb.h < QR_SIZE,
-                          respects QR_MIN_RENDERABLE as absolute floor
+                         respects QR_MIN_RENDERABLE as absolute floor
 
 Slot splitting
 --------------
@@ -290,36 +292,53 @@ def _render_plafond(draw: ImageDraw.ImageDraw,
                     bank: dict, bb: BoundingBox, align: Align,
                     plafond: int, fonts: dict,
                     qr_occupies_left: bool = False) -> None:
-    """Render plafond text block inside bb (NO WORDS)."""
+    """
+    Render plafond text block inside bb.
+
+    Size-adaptive behaviour
+    -----------------------
+    Full layout  (bb.h >= ELEM_MIN_H['plafond']):  label1 + label2 + value
+    Compact layout (bb.h < ELEM_MIN_H['plafond']): value line only, centred
+    """
 
     color  = bank["color"]
     fn_pl  = fonts["plafond"]
     fn_mic = fonts["micro"]
 
+    val = f"{plafond:,.0f} TND".replace(",", " ")
+
+    min_h = ELEM_MIN_H.get("plafond", 52)
+
+    if bb.h < min_h:
+        # Compact fallback: just the numeric value, vertically centred
+        val_h = _th(draw, val, fn_pl)
+        val_w = _tw(draw, val, fn_pl)
+        y = bb.clamp_y(bb.y_for(val_h, VAlign.MIDDLE), val_h)
+        x = bb.clamp_x(bb.x_for(val_w, align), val_w)
+        draw.text((x, y), val, fill=color, font=fn_pl)
+        return
+
     label1 = "Plafond du chèque"
     label2 = "القيمة القصوى للشيك"
-    val    = f"{plafond:,.0f} TND".replace(",", " ")
 
-    # Only 3 lines now
-    lines = [label1, label2, val]
+    lines      = [label1, label2, val]
     fonts_list = [fn_mic, fn_mic, fn_pl]
 
-    line_h = _th(draw, label1, fn_mic) + 2
+    line_h  = _th(draw, label1, fn_mic) + 2
     total_h = line_h * len(lines)
 
-    # vertical centering
     y0 = bb.y_for(total_h, VAlign.MIDDLE)
 
     for i, (txt, fn) in enumerate(zip(lines, fonts_list)):
         tw_ = _tw(draw, txt, fn)
         x   = bb.x_for(tw_, align)
-
         draw.text(
             (x, y0 + i * line_h),
             txt,
             fill=(60, 60, 60) if i < 2 else color,
-            font=fn
+            font=fn,
         )
+
 def _render_cheque_info(draw:       ImageDraw.ImageDraw,
                         bank:       dict,
                         bb:         BoundingBox,
@@ -544,8 +563,13 @@ class HeaderRenderer:
             seg_bb = BoundingBox(bb.x0, y_cur, bb.x1, y_cur + seg_h)
             jbb    = self._jitter_bb(seg_bb)
 
-            # Pre-render size check (emits warning, does not abort)
-            _check_element_fits(elem, jbb)
+            # Pre-render size check: skip the element when the bounding box
+            # is genuinely too small to render it readably.  This prevents
+            # content from being drawn into a cramped area and overlapping
+            # with neighbouring elements.
+            if not _check_element_fits(elem, jbb):
+                y_cur += seg_h
+                continue
 
             self._render_element(elem, jbb, align,
                                   cheque_num, plafond, qr_img, show_logo)
